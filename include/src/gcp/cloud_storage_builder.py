@@ -24,9 +24,9 @@ class CloudStorageBuilder:
     def _get_or_create_bucket(self, bucket_name, bucket_options):
         try:
             bucket = self.client.get_bucket(bucket_name)
-            print(f"Bucket '{bucket_name}' found.")
-        except Exception:
-            print(f"Bucket '{bucket_name}' not found. Creating...")
+            print(f"Bucket '{bucket_name}' encontrado.")
+        except Exception as e:
+            print(f"Bucket '{bucket_name}' não encontrado. Tentando criar... Erro: {e}")
             bucket = self.client.bucket(bucket_name)
 
             bucket.location = bucket_options.get("region", self.default_parameters.get("region"))
@@ -35,11 +35,13 @@ class CloudStorageBuilder:
 
             try:
                 bucket = self.client.create_bucket(bucket)
-                print(f"Bucket '{bucket_name}' created successfully.")
+                print(f"Bucket '{bucket_name}' criado com sucesso.")
             except Exception as e:
-                print(f"Error creating bucket '{bucket_name}': {e}")
+                print(f"Erro ao criar o bucket '{bucket_name}': {e}")
+                raise RuntimeError(f"Erro ao criar bucket '{bucket_name}'") from e
 
         return bucket
+
 
     def _merge_tags(self, bucket_tags, default_tags):
         """Merge bucket tags with default tags."""

@@ -3,40 +3,43 @@ from pendulum import datetime
 from airflow.decorators import dag, task
 from airflow.operators.python import BranchPythonOperator
 from airflow.operators.dummy import DummyOperator
-
-from include.task_groups.gcp_environment_check import gcp_environment_check
-
 from airflow.utils.trigger_rule import TriggerRule
+
+from include.task_groups.gcp_environment_task_group import gcp_environment_check
+from include.task_groups.kaggle_extractor_task_group import kaggle_extractor
 
 @dag(
     dag_id='kaggle_gcp_extraction',
     schedule_interval='@daily',
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=['exemplo', 'gcp', 'task_group']
+    tags=['extraction', 'gcp', 'kaggle']
 )
 def pipeline_kaggle_extractor():
-    # Instanciando a task group
+
+    # Task Group: GCP Environment Check
     env_check = gcp_environment_check()
-    
-    # Adicionando um DummyOperator para convergir os caminhos
+
+    # DummyOperator para convergir os caminhos
     merge_task = DummyOperator(
         task_id='merge_task',
-        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS  # Converge mesmo que alguns caminhos sejam skipped
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
     )
 
-    # Opcional: adicionar uma task final que depende tanto do pipeline principal quanto da Task Group
-    @task
+    # Task Group: Kaggle Extractor
+    kaggle_extraction = kaggle_extractor()
+
+    # Final task to indicate successful pipeline completion
+    @task(task_id='final_message')
     def final_message():
         print("Pipeline concluído com sucesso!")
-    
+
     t_final = final_message()
 
-    # Conectar o merge_task ao final_message
-    env_check >> merge_task >> t_final
+    # Definir fluxo de dependências
+    env_check >> merge_task >> kaggle_extraction >> t_final
 
 dag = pipeline_kaggle_extractor()
-
 
 
 --------------------------------------------------------------------------------
@@ -46,25 +49,39 @@ from typing import Any, Callable
 
 from include.src.gcp.cloud_storage_check import CloudStorageCheck
 from include.src.gcp.bigquery_check import BigQueryCheck
-
 from include.src.gcp.cloud_storage_builder import CloudStorageBuilder
 from include.src.gcp.bigquery_builder import BigQueryBuilder
+
+from include.src.kaggle_pipeline.kaggle_validator import KaggleValidator
+from include.src.kaggle_pipeline.kaggle_extractor import KaggleExtractor
+from include.src.kaggle_pipeline.kaggle_uploader import KaggleUploader
+from include.src.kaggle_pipeline.kaggle_unziped import KaggleUnziped
 
 class ServiceFactory:
     """Factory class to create instances of services like validators and extractors."""
     class_map: dict[str, Callable[[], Any]] = {
+        # GCP Environment
         'cloud_storage_check': CloudStorageCheck,
         'bigquery_check': BigQueryCheck,
         'cloud_storage_builder': CloudStorageBuilder,
-        'bigquery_builder': BigQueryBuilder
+        'bigquery_builder': BigQueryBuilder,
+        
+        # Kaggle Extractor Enviroment
+        'kaggle_validator': KaggleValidator,
+        'kaggle_extractor': KaggleExtractor,
+        'kaggle_uploader': KaggleUploader,
+        'kaggle_unziped': KaggleUnziped,
+        
+        # DBT Data Tranformations
     }
 
     @staticmethod
     def create_instance(service_name: str):
-        if service_name in ServiceFactory.class_map:
+        try:
             return ServiceFactory.class_map[service_name]()
-        else:
-            raise ValueError(f"Service {service_name} not found")
+        except KeyError:
+            raise ValueError(f"Service {service_name} not found in class map.")
+
 
 --------------------------------------------------------------------------------
 
@@ -77,25 +94,23 @@ class ConfigLoader:
         self.config = self._load_config()
 
     def _load_config(self):
-        with open(self.config_path, 'r') as file:
-            return yaml.safe_load(file)
-        return config
-    
+        try:
+            with open(self.config_path, 'r') as file:
+                return yaml.safe_load(file)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Config file not found at {self.config_path}")
+
     def get_default_parameters(self):
-        """Return default parameters."""
         return self.config.get('default_parameters', {})
     
     def get_gcp_configs(self):
-        """Return GCP-specific configurations."""
         return self.config.get('gcp_configs', {})
     
     def get_bucket_configs(self):
-        """Return bucket configurations."""
         gcp_configs = self.get_gcp_configs()
-        return self.gcp_configs.get('cloud_storage', {}).get('buckets',[])
+        return gcp_configs.get('cloud_storage', {}).get('buckets', [])
     
     def get_kaggle_configs(self):
-        """Return Kaggle-specific configurations."""
         return self.config.get('kaggle', {})
 
 --------------------------------------------------------------------------------
@@ -128,12 +143,12 @@ class BigQueryBuilder:
     
     def _create_or_update_dataset(self, dataset_name, options, dataset_tags):
         """Create or update the dataset with the provided configurations."""
-        dataset_id = f"{self.cliente.project}.{dataset_name}"
+        dataset_id = f"{self.client.project}.{dataset_name}"
         dataset = bigquery.Dataset(dataset_id)
 
-        dataset.location = dataset_options.get("region", self.default_parameters.get("region", []))
-        dataset.description = dataset_options.get("description", self.defautl_parameters.get("description", []))
-        dataset_labels = dataset_tags
+        dataset.location = options.get("region", self.default_parameters.get("region"))
+        dataset.description = options.get("description", self.default_parameters.get("description"))
+        dataset.labels = dataset_tags
 
         try:
             dataset = self.client.create_dataset(dataset, exists_ok=True)
@@ -174,7 +189,6 @@ class CloudStorageBuilder:
             self._create_folders(bucket, folders)
 
     def _get_or_create_bucket(self, bucket_name, bucket_options):
-        """Get the bucket if it exists or create a new one with the provided configurations."""
         try:
             bucket = self.client.get_bucket(bucket_name)
             print(f"Bucket '{bucket_name}' found.")
@@ -182,14 +196,15 @@ class CloudStorageBuilder:
             print(f"Bucket '{bucket_name}' not found. Creating...")
             bucket = self.client.bucket(bucket_name)
 
-            # Bucket configuration
             bucket.location = bucket_options.get("region", self.default_parameters.get("region"))
             bucket.storage_class = bucket_options.get("storage_class", self.default_parameters.get("storage_class"))
             bucket.versioning_enabled = bucket_options.get("versioning", self.default_parameters.get("versioning"))
 
-            # Create the bucket
-            bucket = self.client.create_bucket(bucket)
-            print(f"Bucket '{bucket_name}' created successfully.")
+            try:
+                bucket = self.client.create_bucket(bucket)
+                print(f"Bucket '{bucket_name}' created successfully.")
+            except Exception as e:
+                print(f"Error creating bucket '{bucket_name}': {e}")
 
         return bucket
 
@@ -234,21 +249,13 @@ class CloudStorageCheck:
         self.cloud_storage_config = self.config_loader.config.get("cloud_storage", {})
 
     def verify_buckets(self):
-        """
-        Verifica se os buckets esperados já existem no Cloud Storage.
-
-        Retorna:
-            dict: Um relatório com as informações dos buckets existentes e ausentes.
-        """
-
         buckets_config = self.cloud_storage_config.get("buckets", [])
-        expecter_buckets = {bucket['name'] for bucket in buckets_config}
+        expected_buckets = {bucket['name'] for bucket in buckets_config}
         existing_buckets = self._get_existing_buckets()
 
-        # Comparação dos buckets existentes com os esperados
         report = {
             "existing_buckets": expected_buckets & existing_buckets,
-            "missing_buckets": expecter_buckets - existing_buckets
+            "missing_buckets": expected_buckets - existing_buckets
         }
 
         return report
@@ -296,20 +303,180 @@ class BigQueryCheck:
         print(f'Missing datasets: {report['missing_datasets']}')
         return report
 
-        def _get_existing_datasets(self):
-            """
-            Obtém os datasets existentes no BigQuery.
+    def _get_existing_datasets(self):
+        """
+        Obtém os datasets existentes no BigQuery.
 
-            Retorna:
-                set: Um conjunto com os nomes dos datasets existentes.
-            """
-            datasets = self.client.list_datasets()
+        Retorna:
+            set: Um conjunto com os nomes dos datasets existentes.
+        """
+        datasets = self.client.list_datasets()
 
-            return {dataset.dataset_id for dataset in datasets}
+        return {dataset.dataset_id for dataset in datasets}
 
 --------------------------------------------------------------------------------
 
-# include/task_groups/gcp_environment_check.py
+# include/src/kaggle_pipeline/kaggle_validator.py
+import os
+from datetime import datetime
+from google.cloud import storage
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+class KaggleValidator:
+    def __init__(self, config=None):
+        self.client = storage.Client()
+        self.api = KaggleApi()
+        self.api.authenticate()
+        self.config = config or {}
+        self.bucket_name = self.config.get('bucket_name', 'kaggle_bronze')
+
+    def validate_datasets(self, dataset_ids):
+        validation_results = {}
+        for dataset_id in dataset_ids:
+            validation_results[dataset_id] = self._dataset_exists(dataset_id)
+        return validation_results
+
+    def _dataset_exists(self, dataset_id):
+        dataset_name = dataset_id.split('/')[-1]
+        bucket = self.client.bucket(self.bucket_name)
+        blobs = list(bucket.list_blobs(prefix=f"{dataset_name}/"))
+        return bool(blobs)
+
+--------------------------------------------------------------------------------
+
+# include/src/kaggle_pipeline/kaggle_extractor.py
+import os
+from kaggle.api.kaggle_api_extended import KaggleApi
+
+class KaggleExtractor:
+    def __init__(self, config=None):
+        self.api = KaggleApi()
+        self.api.authenticate()
+        self.config = config or {}
+        self.base_path = self.config.get('base_path', '/tmp/kaggle_data')
+
+    def extract_all(self, dataset_ids):
+        results = []
+        for dataset_id in dataset_ids:
+            results.append(self._extract_dataset(dataset_id))
+        return results
+
+    def _extract_dataset(self, dataset_id):
+        dataset_name = dataset_id.split('/')[-1]
+        dataset_path = os.path.join(self.base_path, dataset_name)
+        os.makedirs(dataset_path, exist_ok=True)
+        self.api.dataset_download_files(dataset_id, path=dataset_path, unzip=False)
+        return dataset_path
+
+
+--------------------------------------------------------------------------------
+
+# include/src/kaggle_pipeline/kaggle_unziped.py
+import os
+import zipfile
+
+class KaggleUnziped:
+    def __init__(self, config=None):
+        self.config = config or {}
+
+    def unzip_all(self, data):
+        unzipped_paths = []
+        for file_path in data:
+            unzipped_paths.append(self._unzip_file(file_path))
+        return unzipped_paths
+
+    def _unzip_file(self, file_path):
+        base_dir = os.path.dirname(file_path)
+        unzip_dir = os.path.join(base_dir, "unzipped")
+        os.makedirs(unzip_dir, exist_ok=True)
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            zip_ref.extractall(unzip_dir)
+        print(f"Unzipped {file_path} to {unzip_dir}")
+        return unzip_dir
+
+
+--------------------------------------------------------------------------------
+
+# include/src/kaggle_pipeline/kaggle_uploader.py
+from google.cloud import storage
+
+class KaggleUploader:
+    def __init__(self, config=None):
+        self.client = storage.Client()
+        self.config = config or {}
+        self.bucket_name = self.config.get('bucket_name', 'kaggle_bronze')
+
+    def upload_all(self, data):
+        for file_path in data:
+            self._upload_file(file_path)
+
+    def _upload_file(self, file_path):
+        bucket = self.client.bucket(self.bucket_name)
+        blob_name = os.path.basename(file_path)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(file_path)
+        print(f"Uploaded {file_path} to {self.bucket_name}/{blob_name}")
+
+
+--------------------------------------------------------------------------------
+
+# include/task_groups/kaggle_extractor_task_group.py
+from airflow.decorators import task_group, task
+from airflow.operators.python import BranchPythonOperator
+
+from include.src.factory import ServiceFactory
+
+@task_group
+def kaggle_extractor():
+    def kaggle_validation_branch(**context):
+        kaggle_validator = ServiceFactory.create_instance('kaggle_validator')
+        task_group_id = context['ti'].task.task_group.group_id
+
+        dataset_ids = context['params'].get('dataset_ids', [])
+        validation_report = kaggle_validator.validate_datasets(dataset_ids)
+
+        if all(validation_report.values()):
+            return f"{task_group_id}.datasets_valid"
+        return f"{task_group_id}.extract_datasets"
+
+    t1 = BranchPythonOperator(
+        task_id='kaggle_validation_branch',
+        python_callable=kaggle_validation_branch,
+        provide_context=True
+    )
+
+    @task(task_id='extract_datasets')
+    def extract_datasets():
+        kaggle_extractor = ServiceFactory.create_instance('kaggle_extractor')
+        extracted_data = kaggle_extractor.extract_all()
+        return extracted_data
+
+    @task(task_id='datasets_valid')
+    def datasets_valid():
+        print("Todos os datasets estão válidos e disponíveis no GCS.")
+
+    @task(task_id='upload_to_gcs')
+    def upload_to_gcs(data):
+        kaggle_uploader = ServiceFactory.create_instance('kaggle_uploader')
+        kaggle_uploader.upload_all(data)
+
+    @task(task_id='unzip_files')
+    def unzip_files(data):
+        kaggle_unziped = ServiceFactory.create_instance('kaggle_unziped')
+        unzipped_data = kaggle_unziped.unzip_all(data)
+        return unzipped_data
+
+    extracted_data = extract_datasets()
+    unzipped_data = unzip_files(extracted_data)
+    upload_task = upload_to_gcs(unzipped_data)
+
+    t1 >> [extracted_data, datasets_valid()]
+    extracted_data >> unzipped_data >> upload_task
+
+
+--------------------------------------------------------------------------------
+
+# include/task_groups/gcp_environment_task_group.py
 from airflow.operators.python import BranchPythonOperator
 from airflow.decorators import task_group, task
 
@@ -322,11 +489,15 @@ def gcp_environment_check():
     def cloud_storage_check_branch(**context):
         print("Verificando o ambiente do Cloud Storage")
         # Instância da funcionalidade da task
-        cloud_storage_check = ServiceFactory.cloud_storage_check()
+        cloud_storage_check = ServiceFactory.create_instance('cloud_storage_check')
         # Obtém o task_group_id dinamicamente do contexto
         task_group_id = context['ti'].task.task_group.group_id
         
-        result = False  # Simulação de verificação
+        # Verifica buckets
+        report = cloud_storage_check.verify_buckets()
+        missing_buckets = report['missing_buckets']
+
+        result = len(missing_buckets) == 0  # True se todos os buckets existirem
         
         if result:
             return f"{task_group_id}.environment_checked"
@@ -335,12 +506,16 @@ def gcp_environment_check():
     def bigquery_check_branch(**context):
         print("Verificando o ambiente do BigQuery")
         # Instância da funcionalidade da task
-        bigquery_check = ServiceFactory.bigquery_check()
+        bigquery_check = ServiceFactory.create_instance('bigquery_check')
 
         # Obtém o task_group_id dinamicamente do contexto
         task_group_id = context['ti'].task.task_group.group_id
         
-        result = False  # Simulação de verificação
+        # Verifica datasets
+        report = bigquery_check.verify_datasets()
+        missing_datasets = report['missing_datasets']
+
+        result = len(missing_datasets) == 0  # True se todos os datasets existirem
         
         if result:
             return f"{task_group_id}.environment_checked"
@@ -364,14 +539,15 @@ def gcp_environment_check():
     def cloud_storage_builder():
         print("Construindo o ambiente do Cloud Storage")
         # Instância da funcionalidade da task
-        cloud_storage_builder = ServiceFactory.cloud_storage_builder()
-
+        cloud_storage_builder = ServiceFactory.create_instance('cloud_storage_builder')
+        cloud_storage_builder.validate_or_create_buckets_and_tags()
         return "Cloud Storage Construído"
 
     @task(task_id='bigquery_builder')
     def bigquery_builder():
         print("Construindo o ambiente do BigQuery")
-        bigquery_builder = ServiceFactory.bigquery_builder()
+        bigquery_builder = ServiceFactory.create_instance('bigquery_builder')
+        bigquery_builder.setup_datasets()
         return "BigQuery Construído"
 
     @task(task_id='environment_checked')

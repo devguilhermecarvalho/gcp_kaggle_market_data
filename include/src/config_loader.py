@@ -20,7 +20,16 @@ class ConfigLoader:
     
     def get_bucket_configs(self):
         gcp_configs = self.get_gcp_configs()
-        return gcp_configs.get('cloud_storage', {}).get('buckets', [])
+        buckets = gcp_configs.get('cloud_storage', {}).get('buckets', [])
+        if not buckets:
+            raise ValueError("Nenhum bucket encontrado no arquivo de configuração.")
+        return buckets
     
-    def get_kaggle_configs(self):
-        return self.config.get('kaggle', {})
+    @staticmethod
+    def load_kaggle_config():
+        kaggle_config_path = 'include/configs/kaggle.yml'
+        try:
+            with open(kaggle_config_path, 'r') as file:
+                return yaml.safe_load(file).get('kaggle', {})
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Kaggle config file not found at {kaggle_config_path}")

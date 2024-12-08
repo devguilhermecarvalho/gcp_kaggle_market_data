@@ -9,32 +9,28 @@ class BigQueryCheck:
         self.bigquery_config = self.config_loader.config.get("bigquery", {})
 
     def verify_datasets(self):
-        """
-        Verifica se os datasets esperados já existem no BigQuery.
-        
-        Retorna:
-            dict: Um relatório com as informações dos datasets existentes e ausentes.
-        """
         datasets_config = self.bigquery_config.get("datasets", [])
-        expected_datasets = {dataset["name"] for dataset in datasets_config}
+        expected_datasets = {dataset["name"] for dataset in datasets_config if "name" in dataset}
         existing_datasets = self._get_existing_datasets()
 
-        report ={
+        print(f"Datasets esperados: {expected_datasets}")
+        print(f"Datasets existentes: {existing_datasets}")
+
+        report = {
             "existing_datasets": expected_datasets & existing_datasets,
             "missing_datasets": expected_datasets - existing_datasets
         }
 
-        print(f'Existing datasets: {report['existing_datasets']}')
-        print(f'Missing datasets: {report['missing_datasets']}')
+        print(f"Relatório final: {report}")
         return report
 
-        def _get_existing_datasets(self):
-            """
-            Obtém os datasets existentes no BigQuery.
+    def _get_existing_datasets(self):
+        """
+        Obtém os datasets existentes no BigQuery.
 
-            Retorna:
-                set: Um conjunto com os nomes dos datasets existentes.
-            """
-            datasets = self.client.list_datasets()
+        Retorna:
+            set: Um conjunto com os nomes dos datasets existentes.
+        """
+        datasets = self.client.list_datasets()
 
-            return {dataset.dataset_id for dataset in datasets}
+        return {dataset.dataset_id for dataset in datasets}

@@ -1,38 +1,42 @@
 from airflow.operators.python import BranchPythonOperator
 from airflow.decorators import task_group, task
 
-# Factory
 from include.src.factory import ServiceFactory
 
 @task_group
 def gcp_environment_check():
     # Define funções para os BranchPythonOperators
     def cloud_storage_check_branch(**context):
-        print("Verificando o ambiente do Cloud Storage")
-        # Instância da funcionalidade da task
-        cloud_storage_check = ServiceFactory.cloud_storage_check()
-        # Obtém o task_group_id dinamicamente do contexto
+        print("Iniciando verificação do ambiente do Cloud Storage")
+        cloud_storage_check = ServiceFactory.create_instance('cloud_storage_check')
         task_group_id = context['ti'].task.task_group.group_id
+
+        # Relatório de buckets
+        report = cloud_storage_check.verify_buckets()
+        print(f"Relatório de buckets: {report}")
+
+        if report['missing_buckets']:
+            print(f"Buckets ausentes detectados: {report['missing_buckets']}")
+            return f"{task_group_id}.cloud_storage_builder"
         
-        result = False  # Simulação de verificação
-        
-        if result:
-            return f"{task_group_id}.environment_checked"
-        return f"{task_group_id}.cloud_storage_builder"
+        print("Todos os buckets estão presentes. Seguindo para próxima etapa.")
+        return f"{task_group_id}.environment_checked"
 
     def bigquery_check_branch(**context):
-        print("Verificando o ambiente do BigQuery")
-        # Instância da funcionalidade da task
-        bigquery_check = ServiceFactory.bigquery_check()
-
-        # Obtém o task_group_id dinamicamente do contexto
+        print("Iniciando verificação do ambiente do BigQuery")
+        bigquery_check = ServiceFactory.create_instance('bigquery_check')
         task_group_id = context['ti'].task.task_group.group_id
+
+        # Relatório de datasets
+        report = bigquery_check.verify_datasets()
+        print(f"Relatório de datasets: {report}")
+
+        if report['missing_datasets']:
+            print(f"Datasets ausentes detectados: {report['missing_datasets']}")
+            return f"{task_group_id}.bigquery_builder"
         
-        result = False  # Simulação de verificação
-        
-        if result:
-            return f"{task_group_id}.environment_checked"
-        return f"{task_group_id}.bigquery_builder"
+        print("Todos os datasets estão presentes. Seguindo para próxima etapa.")
+        return f"{task_group_id}.environment_checked"
 
     # Branch para Cloud Storage
     t1 = BranchPythonOperator(
@@ -52,14 +56,15 @@ def gcp_environment_check():
     def cloud_storage_builder():
         print("Construindo o ambiente do Cloud Storage")
         # Instância da funcionalidade da task
-        cloud_storage_builder = ServiceFactory.cloud_storage_builder()
-
+        cloud_storage_builder = ServiceFactory.create_instance('cloud_storage_builder')
+        cloud_storage_builder.validate_or_create_buckets_and_tags()
         return "Cloud Storage Construído"
 
     @task(task_id='bigquery_builder')
     def bigquery_builder():
         print("Construindo o ambiente do BigQuery")
-        bigquery_builder = ServiceFactory.bigquery_builder()
+        bigquery_builder = ServiceFactory.create_instance('bigquery_builder')
+        bigquery_builder.setup_datasets()
         return "BigQuery Construído"
 
     @task(task_id='environment_checked')
