@@ -1,0 +1,393 @@
+# dags/kaggle_extractor.py
+from pendulum import datetime
+from airflow.decorators import dag, task
+from airflow.operators.python import BranchPythonOperator
+from airflow.operators.dummy import DummyOperator
+
+from include.task_groups.gcp_environment_check import gcp_environment_check
+
+from airflow.utils.trigger_rule import TriggerRule
+
+@dag(
+    dag_id='kaggle_gcp_extraction',
+    schedule_interval='@daily',
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    tags=['exemplo', 'gcp', 'task_group']
+)
+def pipeline_kaggle_extractor():
+    # Instanciando a task group
+    env_check = gcp_environment_check()
+    
+    # Adicionando um DummyOperator para convergir os caminhos
+    merge_task = DummyOperator(
+        task_id='merge_task',
+        trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS  # Converge mesmo que alguns caminhos sejam skipped
+    )
+
+    # Opcional: adicionar uma task final que depende tanto do pipeline principal quanto da Task Group
+    @task
+    def final_message():
+        print("Pipeline concluído com sucesso!")
+    
+    t_final = final_message()
+
+    # Conectar o merge_task ao final_message
+    env_check >> merge_task >> t_final
+
+dag = pipeline_kaggle_extractor()
+
+
+
+--------------------------------------------------------------------------------
+
+# include/src/factory.py
+from typing import Any, Callable
+
+from include.src.gcp.cloud_storage_check import CloudStorageCheck
+from include.src.gcp.bigquery_check import BigQueryCheck
+
+from include.src.gcp.cloud_storage_builder import CloudStorageBuilder
+from include.src.gcp.bigquery_builder import BigQueryBuilder
+
+class ServiceFactory:
+    """Factory class to create instances of services like validators and extractors."""
+    class_map: dict[str, Callable[[], Any]] = {
+        'cloud_storage_check': CloudStorageCheck,
+        'bigquery_check': BigQueryCheck,
+        'cloud_storage_builder': CloudStorageBuilder,
+        'bigquery_builder': BigQueryBuilder
+    }
+
+    @staticmethod
+    def create_instance(service_name: str):
+        if service_name in ServiceFactory.class_map:
+            return ServiceFactory.class_map[service_name]()
+        else:
+            raise ValueError(f"Service {service_name} not found")
+
+--------------------------------------------------------------------------------
+
+# include/src/config_loader.py
+import yaml
+
+class ConfigLoader:
+    def __init__(self, config_path='include/configs/google_cloud.yml'):
+        self.config_path = config_path
+        self.config = self._load_config()
+
+    def _load_config(self):
+        with open(self.config_path, 'r') as file:
+            return yaml.safe_load(file)
+        return config
+    
+    def get_default_parameters(self):
+        """Return default parameters."""
+        return self.config.get('default_parameters', {})
+    
+    def get_gcp_configs(self):
+        """Return GCP-specific configurations."""
+        return self.config.get('gcp_configs', {})
+    
+    def get_bucket_configs(self):
+        """Return bucket configurations."""
+        gcp_configs = self.get_gcp_configs()
+        return self.gcp_configs.get('cloud_storage', {}).get('buckets',[])
+    
+    def get_kaggle_configs(self):
+        """Return Kaggle-specific configurations."""
+        return self.config.get('kaggle', {})
+
+--------------------------------------------------------------------------------
+
+# include/src/gcp/bigquery_builder.py
+from google.cloud import bigquery
+from include.src.config_loader import ConfigLoader
+
+class BigQueryBuilder:
+    def __init__(self):
+        self.config_loader = ConfigLoader()
+        self.client = bigquery.Client()
+        self.default_parameters = self.config_loader.get_default_parameters()
+        self.bigquery_config = self.config_loader.config.get("bigquery", {})
+    
+    def setup_datasets(self):
+        """Set up datasets in BigQuery based on YAML configurations."""
+        datasets_config = self.bigquery_config.get("datasets", [])
+        try:
+            for dataset_config in datasets_config:
+                dataset_name = dataset_config["name"]
+                dataset_options = dataset_config.get("options", {})
+                dataset_tags = self._merge_tags(
+                    dataset_options.get('tags', {}),
+                    self.default_parameters.get('tags', {})
+                )
+            self._create_or_update_dataset(dataset_name, dataset_options, dataset_tags)
+        except Exception as e:
+            print(f"Error setting up datasets: {e}")
+    
+    def _create_or_update_dataset(self, dataset_name, options, dataset_tags):
+        """Create or update the dataset with the provided configurations."""
+        dataset_id = f"{self.cliente.project}.{dataset_name}"
+        dataset = bigquery.Dataset(dataset_id)
+
+        dataset.location = dataset_options.get("region", self.default_parameters.get("region", []))
+        dataset.description = dataset_options.get("description", self.defautl_parameters.get("description", []))
+        dataset_labels = dataset_tags
+
+        try:
+            dataset = self.client.create_dataset(dataset, exists_ok=True)
+            print(f"Dataset {dataset_name} created or updated successfully.")
+        except Exception as e:
+            print(f"Error creating or updating dataset {dataset_name}: {e}")
+        
+    def _merge_tags(self, dataset_tags, default_tags):
+        """Merge dataset tags with default tags."""
+        merged_tags = default_tags.copy()
+        merged_tags.update(dataset_tags)
+        return merged_tags
+
+--------------------------------------------------------------------------------
+
+# include/src/gcp/cloud_storage_builder.py
+from google.cloud import storage
+from include.src.config_loader import ConfigLoader
+
+class CloudStorageBuilder:
+    def __init__(self):
+        
+        self.config_loader = ConfigLoader()
+        self.client = storage.Client()
+        self.default_parameters = self.config_loader.get_default_parameters()
+        self.buckets_config = self.config_loader.get_bucket_configs()
+
+    def validate_or_create_buckets_and_tags(self):
+        """Validate, create, and apply bucket configurations and tags."""
+        for bucket_config in self.buckets_config:
+            bucket_name = bucket_config["name"]
+            bucket_options = bucket_config.get("options", {})
+            folders = bucket_config.get("folders", [])
+            bucket_tags = self._merge_tags(bucket_options.get("tags", {}), self.default_parameters.get("tags", {}))
+
+            bucket = self._get_or_create_bucket(bucket_name, bucket_options)
+            self._validate_and_apply_tags(bucket, bucket_tags)
+            self._create_folders(bucket, folders)
+
+    def _get_or_create_bucket(self, bucket_name, bucket_options):
+        """Get the bucket if it exists or create a new one with the provided configurations."""
+        try:
+            bucket = self.client.get_bucket(bucket_name)
+            print(f"Bucket '{bucket_name}' found.")
+        except Exception:
+            print(f"Bucket '{bucket_name}' not found. Creating...")
+            bucket = self.client.bucket(bucket_name)
+
+            # Bucket configuration
+            bucket.location = bucket_options.get("region", self.default_parameters.get("region"))
+            bucket.storage_class = bucket_options.get("storage_class", self.default_parameters.get("storage_class"))
+            bucket.versioning_enabled = bucket_options.get("versioning", self.default_parameters.get("versioning"))
+
+            # Create the bucket
+            bucket = self.client.create_bucket(bucket)
+            print(f"Bucket '{bucket_name}' created successfully.")
+
+        return bucket
+
+    def _merge_tags(self, bucket_tags, default_tags):
+        """Merge bucket tags with default tags."""
+        merged_tags = default_tags.copy()
+        merged_tags.update(bucket_tags)
+        return merged_tags
+
+    def _validate_and_apply_tags(self, bucket, tags):
+        """Validate and apply tags to the bucket."""
+        existing_tags = bucket.labels
+
+        if existing_tags != tags:
+            bucket.labels = tags
+            bucket.patch()
+            print(f"Tags updated on bucket '{bucket.name}': {tags}")
+        else:
+            print(f"Tags on bucket '{bucket.name}' are already up-to-date.")
+
+    def _create_folders(self, bucket, folders):
+        """Create simulated folders in the bucket."""
+        for folder_name in folders:
+            blob = bucket.blob(f"{folder_name}/")
+            if not blob.exists():
+                blob.upload_from_string("")
+                print(f"Folder '{folder_name}' created in '{bucket.name}'.")
+            else:
+                print(f"Folder '{folder_name}' already exists in '{bucket.name}'.")
+
+--------------------------------------------------------------------------------
+
+# include/src/gcp/cloud_storage_check.py
+from google.cloud import storage
+from include.src.config_loader import ConfigLoader
+
+class CloudStorageCheck:
+    def __init__(self):
+        self.config_loader = ConfigLoader()
+        self.client = storage.Client()
+        self.defautl_parameters = self.config_loader.get_default_parameters()
+        self.cloud_storage_config = self.config_loader.config.get("cloud_storage", {})
+
+    def verify_buckets(self):
+        """
+        Verifica se os buckets esperados já existem no Cloud Storage.
+
+        Retorna:
+            dict: Um relatório com as informações dos buckets existentes e ausentes.
+        """
+
+        buckets_config = self.cloud_storage_config.get("buckets", [])
+        expecter_buckets = {bucket['name'] for bucket in buckets_config}
+        existing_buckets = self._get_existing_buckets()
+
+        # Comparação dos buckets existentes com os esperados
+        report = {
+            "existing_buckets": expected_buckets & existing_buckets,
+            "missing_buckets": expecter_buckets - existing_buckets
+        }
+
+        return report
+    
+    def _get_existing_buckets(self):
+        """
+        Obtém os nomes dos buckets existentes no Cloud Storage.
+
+        Retorna:
+            set: Um conjunto com os nomes dos buckets existentes.
+        """
+        buckets = self.client.list_buckets()
+        return {bucket.name for bucket in buckets}
+
+--------------------------------------------------------------------------------
+
+# include/src/gcp/bigquery_check.py
+from google.cloud import bigquery
+from include.src.config_loader import ConfigLoader
+
+class BigQueryCheck:
+    def __init__(self):
+        self.config_loader = ConfigLoader()
+        self.client = bigquery.Client()
+        self.default_parameters = self.config_loader.get_default_parameters()
+        self.bigquery_config = self.config_loader.config.get("bigquery", {})
+
+    def verify_datasets(self):
+        """
+        Verifica se os datasets esperados já existem no BigQuery.
+        
+        Retorna:
+            dict: Um relatório com as informações dos datasets existentes e ausentes.
+        """
+        datasets_config = self.bigquery_config.get("datasets", [])
+        expected_datasets = {dataset["name"] for dataset in datasets_config}
+        existing_datasets = self._get_existing_datasets()
+
+        report ={
+            "existing_datasets": expected_datasets & existing_datasets,
+            "missing_datasets": expected_datasets - existing_datasets
+        }
+
+        print(f'Existing datasets: {report['existing_datasets']}')
+        print(f'Missing datasets: {report['missing_datasets']}')
+        return report
+
+        def _get_existing_datasets(self):
+            """
+            Obtém os datasets existentes no BigQuery.
+
+            Retorna:
+                set: Um conjunto com os nomes dos datasets existentes.
+            """
+            datasets = self.client.list_datasets()
+
+            return {dataset.dataset_id for dataset in datasets}
+
+--------------------------------------------------------------------------------
+
+# include/task_groups/gcp_environment_check.py
+from airflow.operators.python import BranchPythonOperator
+from airflow.decorators import task_group, task
+
+# Factory
+from include.src.factory import ServiceFactory
+
+@task_group
+def gcp_environment_check():
+    # Define funções para os BranchPythonOperators
+    def cloud_storage_check_branch(**context):
+        print("Verificando o ambiente do Cloud Storage")
+        # Instância da funcionalidade da task
+        cloud_storage_check = ServiceFactory.cloud_storage_check()
+        # Obtém o task_group_id dinamicamente do contexto
+        task_group_id = context['ti'].task.task_group.group_id
+        
+        result = False  # Simulação de verificação
+        
+        if result:
+            return f"{task_group_id}.environment_checked"
+        return f"{task_group_id}.cloud_storage_builder"
+
+    def bigquery_check_branch(**context):
+        print("Verificando o ambiente do BigQuery")
+        # Instância da funcionalidade da task
+        bigquery_check = ServiceFactory.bigquery_check()
+
+        # Obtém o task_group_id dinamicamente do contexto
+        task_group_id = context['ti'].task.task_group.group_id
+        
+        result = False  # Simulação de verificação
+        
+        if result:
+            return f"{task_group_id}.environment_checked"
+        return f"{task_group_id}.bigquery_builder"
+
+    # Branch para Cloud Storage
+    t1 = BranchPythonOperator(
+        task_id='cloud_storage_check_branch',
+        python_callable=cloud_storage_check_branch,
+        provide_context=True
+    )
+    
+    # Branch para BigQuery
+    t2 = BranchPythonOperator(
+        task_id='bigquery_check_branch',
+        python_callable=bigquery_check_branch,
+        provide_context=True
+    )
+
+    @task(task_id='cloud_storage_builder')
+    def cloud_storage_builder():
+        print("Construindo o ambiente do Cloud Storage")
+        # Instância da funcionalidade da task
+        cloud_storage_builder = ServiceFactory.cloud_storage_builder()
+
+        return "Cloud Storage Construído"
+
+    @task(task_id='bigquery_builder')
+    def bigquery_builder():
+        print("Construindo o ambiente do BigQuery")
+        bigquery_builder = ServiceFactory.bigquery_builder()
+        return "BigQuery Construído"
+
+    @task(task_id='environment_checked')
+    def environment_checked():
+        print("Ambiente verificado com sucesso!")
+        return "Ambiente Verificado"
+
+    # Instancia tarefas de construção e verificação
+    t3 = cloud_storage_builder()
+    t4 = bigquery_builder()
+    t5 = environment_checked()
+
+    # Configura os BranchPythonOperators para decidir o caminho
+    t1 >> [t3, t5]
+    t2 >> [t4, t5]
+
+
+--------------------------------------------------------------------------------
+

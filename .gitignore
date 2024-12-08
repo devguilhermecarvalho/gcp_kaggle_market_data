@@ -1,3 +1,10 @@
+# Personal Configs
+.credentials/
+credentials/
+google_cloud.json
+kaggle.json
+chatgpt.txt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
