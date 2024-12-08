@@ -15,13 +15,9 @@ from include.task_groups.kaggle_extractor_task_group import kaggle_extractor
     tags=['extraction', 'gcp', 'kaggle']
 )
 def pipeline_kaggle_extractor():
-    # Task Group: GCP Environment Check
     env_check = gcp_environment_check()
-
-    # Task Group: Kaggle Extractor
     kaggle_extraction = kaggle_extractor()
 
-    # DummyOperator para convergir os caminhos
     merge_task_01 = DummyOperator(
         task_id='merge_task_01',
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
@@ -32,14 +28,12 @@ def pipeline_kaggle_extractor():
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS
     )
 
-    # Final task to indicate successful pipeline completion
     @task(task_id='final_test_message')
     def final_test_message():
         print("Pipeline concluído com sucesso!")
 
     t_final = final_test_message()
 
-    # Definir fluxo de dependências
     env_check >> merge_task_01 >> kaggle_extraction >> merge_task_02 >> t_final
 
 dag = pipeline_kaggle_extractor()

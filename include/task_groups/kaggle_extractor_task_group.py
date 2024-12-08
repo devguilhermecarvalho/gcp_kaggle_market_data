@@ -1,31 +1,24 @@
 from airflow.decorators import task_group, task
 from airflow.operators.python import BranchPythonOperator
-
 from include.src.factory import ServiceFactory
-from include.src.config_loader import ConfigLoader 
+from include.src.config_loader import ConfigLoader
+
 
 @task_group
 def kaggle_extractor():
     def kaggle_validation_branch(**context):
         kaggle_validator = ServiceFactory.create_instance('kaggle_validator')
-        
-        # Carrega as configurações específicas do Kaggle
-        config_loader = ServiceFactory.create_instance('config_loader')
         kaggle_config = ConfigLoader.load_kaggle_config()
         
-        dataset_ids = kaggle_config.get('datasets', [])
-        if not dataset_ids:
-            raise ValueError("Nenhum dataset encontrado na configuração do Kaggle.")
-
-        dataset_ids = [d['id'] for d in dataset_ids]
-        print(f"Datasets a validar: {dataset_ids}")
-
+        dataset_ids = [d['id'] for d in kaggle_config.get('datasets', [])]
         validation_report = kaggle_validator.validate_datasets(dataset_ids)
-        print(f"Relatório de validação: {validation_report}")
 
-        if all(validation_report.values()):
-            return "kaggle_extractor.datasets_valid"
-        return "kaggle_extractor.extract_datasets"
+        for dataset_id, result in validation_report.items():
+            if not result["compacted_present"] or not result["unzipped_present"]:
+                print(f"Arquivos ausentes ou inválidos detectados para o dataset '{dataset_id}'.")
+                return "kaggle_extractor.extract_datasets"
+        print("Todos os arquivos estão disponíveis no bucket com a estrutura de pastas por data.")
+        return "kaggle_extractor.datasets_valid"
 
     t1 = BranchPythonOperator(
         task_id='kaggle_validation_branch',
@@ -36,39 +29,45 @@ def kaggle_extractor():
     @task(task_id='extract_datasets')
     def extract_datasets():
         kaggle_extractor = ServiceFactory.create_instance('kaggle_extractor')
-        
-        # Carrega configurações do arquivo kaggle.yml
         kaggle_config = ConfigLoader.load_kaggle_config()
-        dataset_ids = kaggle_config.get('datasets', [])
         
-        if not dataset_ids:
-            raise ValueError("Nenhum dataset encontrado na configuração do Kaggle.")
-
-        dataset_ids = [d['id'] for d in dataset_ids]
-        print(f"Extraindo datasets: {dataset_ids}")
-        
+        dataset_ids = [d['id'] for d in kaggle_config.get('datasets', [])]
         extracted_data = kaggle_extractor.extract_all(dataset_ids)
-        print(f"Dados extraídos: {extracted_data}")
         return extracted_data
 
     @task(task_id='datasets_valid')
     def datasets_valid():
-        print("Todos os datasets já estão disponíveis no bucket.")
+        print("Todos os datasets já estão disponíveis no bucket. Pulando extração.")
+
+    @task(task_id='unzip_files')
+    def unzip_files(data):
+        kaggle_unziped = ServiceFactory.create_instance('kaggle_unziped')
+
+        # Verifica se todos os arquivos existem antes de prosseguir
+        for file_path in data:
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Arquivo '{file_path}' não encontrado para descompactação.")
+
+        unzipped_data = kaggle_unziped.unzip_all(data)
+        return unzipped_data
 
     @task(task_id='upload_to_gcs')
     def upload_to_gcs(data):
         kaggle_uploader = ServiceFactory.create_instance('kaggle_uploader')
-        kaggle_uploader.upload_all(data)
 
-    @task(task_id='unzip_files')
-    def unzip_files(data):
-        """
-        Descompacta os arquivos .zip e retorna os caminhos dos diretórios descompactados.
-        """
-        kaggle_unziped = ServiceFactory.create_instance('kaggle_unziped')
-        unzipped_data = kaggle_unziped.unzip_all(data)
-        print(f"Arquivos descompactados: {unzipped_data}")
-        return unzipped_data
+        current_date = data.get("current_date", "unknown_date")
+        dataset_name = data.get("dataset_name", "unknown_dataset")
+
+        compacted_path = f"{kaggle_uploader.folder}/{dataset_name}/{current_date}/compacted/"
+        unzipped_path = f"{kaggle_uploader.folder}/{dataset_name}/{current_date}/unzipped/"
+
+        # Upload compactado
+        print(f"Fazendo upload de arquivos compactados para {compacted_path}.")
+        kaggle_uploader.upload_all(data["compacted"], destination_path=compacted_path)
+
+        # Upload descompactado
+        print(f"Fazendo upload de arquivos descompactados para {unzipped_path}.")
+        kaggle_uploader.upload_all(data["unzipped"], destination_path=unzipped_path)
 
     extracted_data = extract_datasets()
     unzipped_data = unzip_files(extracted_data)

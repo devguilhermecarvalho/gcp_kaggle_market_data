@@ -30,6 +30,7 @@ class KaggleUploader:
                     full_path = os.path.join(root, file_name)
                     self._upload_individual_file(full_path, file_path)
         elif os.path.isfile(file_path):
+            print(f"Enviando arquivo '{file_path}' para o bucket.")
             self._upload_individual_file(file_path)
         else:
             print(f"'{file_path}' não é um arquivo ou diretório válido. Pulando.")

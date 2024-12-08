@@ -1,45 +1,44 @@
 from google.cloud import storage
-from kaggle.api.kaggle_api_extended import KaggleApi
-from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 class KaggleValidator:
     def __init__(self, config=None):
-        """
-        Inicializa o validador com o cliente do Cloud Storage e configurações do Kaggle.
-        """
         self.config = config or {}
         self.bucket_name = self.config.get('bucket_name', 'kaggle_landing_zone')
         self.folder = self.config.get('folder', 'bronze')
-        
-        # Inicializa o cliente do Cloud Storage
-        self.client = storage.Client()
 
-        # Inicializa o cliente do Kaggle
-        self.api = KaggleApi()
-        self.api.authenticate()
+        self.client = storage.Client()
 
     def validate_datasets(self, dataset_ids):
         """
-        Valida se os arquivos zipados dos datasets Kaggle já existem no bucket.
+        Valida se os datasets estão presentes no bucket com base na data atual.
         """
-        with ThreadPoolExecutor() as executor:
-            results = list(executor.map(self._dataset_exists_in_bucket, dataset_ids))
-        return dict(zip(dataset_ids, results))
+        results = {}
+        current_date = datetime.now().strftime("%d-%m-%Y")
 
-    def _dataset_exists_in_bucket(self, dataset_name):
+        for dataset_id in dataset_ids:
+            dataset_name = dataset_id.split('/')[-1]
+            compacted_path = f"{self.folder}/{dataset_name}/{current_date}/compacted/"
+            unzipped_path = f"{self.folder}/{dataset_name}/{current_date}/unzipped/"
+
+            compacted_present = self._path_exists(compacted_path)
+            unzipped_present = self._path_exists(unzipped_path)
+
+            results[dataset_id] = {
+                "compacted_present": compacted_present,
+                "unzipped_present": unzipped_present,
+            }
+
+            if not compacted_present or not unzipped_present:
+                print(f"Dataset '{dataset_name}' não validado. Arquivos ausentes.")
+            else:
+                print(f"Dataset '{dataset_name}' validado no bucket.")
+        return results
+
+    def _path_exists(self, prefix):
         """
-        Verifica se os arquivos zipados de um dataset existem no bucket no prefixo correto.
+        Verifica se há arquivos no bucket com o prefixo fornecido.
         """
         bucket = self.client.bucket(self.bucket_name)
-        prefix = f"{self.folder}/{dataset_name}/"
-        print(f"Verificando no bucket '{self.bucket_name}' com prefixo '{prefix}'")
-
         blobs = list(bucket.list_blobs(prefix=prefix))
-        exists = any(blob.name.endswith('.zip') for blob in blobs)
-        
-        if exists:
-            print(f"Dataset '{dataset_name}' encontrado no bucket.")
-        else:
-            print(f"Dataset '{dataset_name}' NÃO encontrado no bucket.")
-        
-        return exists
+        return bool(blobs)
