@@ -1,11 +1,15 @@
-# Personal Configs
+# Ignorar configurações pessoais
 .credentials/
 credentials/
 google_cloud.json
 kaggle.json
+
+# Arquivos relacionados ao ChatGPT
 chatgpt.txt
-*chatgpt
+*chatgpt*
 chatgpt.ipynb
+
+# Arquivos extraídos
 extracted_python_files.txt
 extracted_files.txt
 
