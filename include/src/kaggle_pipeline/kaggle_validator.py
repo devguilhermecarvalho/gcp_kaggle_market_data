@@ -10,16 +10,12 @@ class KaggleValidator:
         self.client = storage.Client()
 
     def validate_datasets(self, dataset_ids):
-        """
-        Valida se os datasets estão presentes no bucket com base na data atual.
-        """
         results = {}
-        current_date = datetime.now().strftime("%d-%m-%Y")
 
         for dataset_id in dataset_ids:
             dataset_name = dataset_id.split('/')[-1]
-            compacted_path = f"{self.folder}/{dataset_name}/{current_date}/compacted/"
-            unzipped_path = f"{self.folder}/{dataset_name}/{current_date}/unzipped/"
+            compacted_path = f"{self.folder}/{dataset_name}/compacted/"
+            unzipped_path = f"{self.folder}/{dataset_name}/unzipped/"
 
             compacted_present = self._path_exists(compacted_path)
             unzipped_present = self._path_exists(unzipped_path)

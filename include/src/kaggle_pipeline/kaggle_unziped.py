@@ -18,8 +18,11 @@ class KaggleUnziped:
         self.bucket_name = 'kaggle_landing_zone'
 
     def unzip_all(self, data):
+        """
+        Descompacta e faz upload de múltiplos datasets em paralelo.
+        """
         unzipped_paths = []
-        with ThreadPoolExecutor() as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(self._unzip_and_upload, file_info) for file_info in data]
             for future in futures:
                 try:
@@ -62,16 +65,29 @@ class KaggleUnziped:
             return destination_folder
 
     def _upload_directory_to_bucket(self, directory_path, destination_path):
+        """
+        Faz o upload dos arquivos extraídos para o bucket em paralelo.
+        """
         bucket = self.client.bucket(self.bucket_name)
-        for root, _, files in os.walk(directory_path):
-            for file_name in files:
-                full_path = os.path.join(root, file_name)
-                relative_path = os.path.relpath(full_path, directory_path)
-                blob_name = f"{destination_path}{relative_path}"
-                blob = bucket.blob(blob_name)
-                try:
-                    blob.upload_from_filename(full_path)
-                    logging.info(f"Arquivo '{full_path}' enviado para 'gs://{self.bucket_name}/{blob_name}'")
-                except Exception as e:
-                    logging.error(f"Erro ao fazer upload do arquivo: {e}")
-                    raise
+        
+        def upload_file(file_path):
+            relative_path = os.path.relpath(file_path, directory_path)
+            blob_name = f"{destination_path}{relative_path}"
+            blob = bucket.blob(blob_name)
+            try:
+                blob.upload_from_filename(file_path)
+                logging.info(f"Arquivo '{file_path}' enviado para 'gs://{self.bucket_name}/{blob_name}'")
+            except Exception as e:
+                logging.error(f"Erro ao enviar arquivo '{file_path}': {e}")
+                raise
+
+        # Lista todos os arquivos no diretório
+        files_to_upload = [
+            os.path.join(root, file_name)
+            for root, _, files in os.walk(directory_path)
+            for file_name in files
+        ]
+
+        # Upload em paralelo
+        with ThreadPoolExecutor(max_workers=10) as executor:  # Ajuste `max_workers` conforme necessário
+            executor.map(upload_file, files_to_upload)

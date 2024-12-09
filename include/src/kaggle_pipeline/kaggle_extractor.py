@@ -25,8 +25,7 @@ class KaggleExtractor:
 
     def _extract_dataset(self, dataset_id):
         dataset_name = dataset_id.split('/')[-1]
-        current_date = datetime.now().strftime("%d-%m-%Y")
-        compacted_path = f"{self.folder}/{dataset_name}/{current_date}/compacted/"
+        compacted_path = f"{self.folder}/{dataset_name}/compacted/"
 
         with tempfile.TemporaryDirectory() as temp_dir:
             zip_file_path = os.path.join(temp_dir, f"{dataset_name}.zip")
@@ -41,6 +40,7 @@ class KaggleExtractor:
             self._upload_to_bucket(zip_file_path, compacted_path)
 
             return {"path": f"{compacted_path}{os.path.basename(zip_file_path)}", "dataset_name": dataset_name}
+
 
     def _upload_to_bucket(self, file_path, destination_path):
         bucket = self.client.bucket(self.bucket_name)
