@@ -4,4 +4,5 @@ kaggle:
     - id: 'olistbr/brazilian-ecommerce'
   bucket_name: 'kaggle_landing_zone'
   folder: 'bronze'
-  
+  compacted_folder: 'compacted'
+  unzipped_folder: 'unzipped'
